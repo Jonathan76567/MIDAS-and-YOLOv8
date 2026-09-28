@@ -1,0 +1,17 @@
+# Environment & cache
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.stackdump
+
+# Dataset (besar; CarDD tidak boleh disebar ulang). Hanya price_list.json yang di-track.
+data/raw/
+data/annotated/
+
+# Hasil training & evaluasi (grafik, checkpoint). Model final ada di weights/.
+runs/
+output/
+
+# Clone repo yang tidak sengaja ada di dalam folder project
+MIDAS-and-YOLOv8/

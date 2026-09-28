@@ -1,0 +1,38 @@
+{
+  "bengkel_info": {
+    "nama_mitra": "Bengkel Body Repair Mitra UBM",
+    "mata_uang": "IDR"
+  },
+  "bobot_formula": {
+    "alpha_luas": 0.5,
+    "beta_kedalaman": 0.8
+  },
+  "harga_base_panel": {
+    "pintu_depan": 500000,
+    "pintu_belakang": 500000,
+    "bumper_depan": 450000,
+    "bumper_belakang": 450000,
+    "kap_mesin": 650000,
+    "fender": 400000,
+    "bagasi": 500000
+  },
+  "panel_mapping": {
+    "_keterangan": "kelas model panel -> key harga_base_panel; null = panel body tapi harga belum tersedia",
+    "Front-door": "pintu_depan",
+    "Back-door": "pintu_belakang",
+    "Front-bumper": "bumper_depan",
+    "Back-bumper": "bumper_belakang",
+    "Hood": "kap_mesin",
+    "Fender": "fender",
+    "Trunk": "bagasi",
+    "Quarter-panel": null,
+    "Rocker-panel": null,
+    "Roof": null
+  },
+  "kelas_kedalaman": {
+    "_keterangan": "hanya kerusakan kelas ini yang diukur kedalamannya (D_depth); kelas lain D_depth = 0",
+    "kelas": [
+      "Dent"
+    ]
+  }
+}
