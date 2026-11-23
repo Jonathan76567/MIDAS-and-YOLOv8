@@ -1,7 +1,3 @@
-"""
-Web app estimasi biaya body repair.
-Jalankan: streamlit run app.py
-"""
 import cv2
 import numpy as np
 import pandas as pd
@@ -11,8 +7,12 @@ from src.pipeline import BodyRepairPipeline
 
 st.set_page_config(page_title="Estimasi Biaya Body Repair", page_icon="🚗", layout="wide")
 
+NAMA_KERUSAKAN = {"Dent": "Penyok", "Scratch": "Baret"}
+PERINGATAN = ("Harga di atas hanya estimasi awal dan belum menjadi harga final. "
+              "Untuk pengecekan dan harga pasti, silakan bawa kendaraan ke bengkel.")
 
-@st.cache_resource(show_spinner="Memuat model (YOLOv8-Seg & MiDaS)...")
+
+@st.cache_resource(show_spinner="Memuat model...")
 def load_pipeline():
     return BodyRepairPipeline()
 
@@ -21,62 +21,59 @@ def to_rgb(img_bgr):
     return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
 
+def nama_panel(key):
+    return key.replace("_", " ").title()
+
+
+def rupiah(nilai):
+    return f"Rp {nilai:,.0f}".replace(",", ".")
+
+
 pipeline = load_pipeline()
 calc = pipeline.calculator
 
-# ---------------- Sidebar ----------------
-st.sidebar.header("Pengaturan")
-conf = st.sidebar.slider("Confidence threshold", 0.05, 0.95, 0.25, 0.05)
-st.sidebar.markdown("**Formula biaya**")
-st.sidebar.latex(r"P = P_{base}\,(1 + \alpha A_{mask} + \beta D_{depth})")
-st.sidebar.caption(f"α = {calc.alpha}, β = {calc.beta}")
-with st.sidebar.expander("Harga dasar panel"):
-    st.table(pd.DataFrame(
-        [(k, f"Rp {v:,.0f}".replace(",", ".")) for k, v in calc.db["harga_base_panel"].items()],
+st.sidebar.header("Informasi")
+st.sidebar.subheader("Harga dasar per panel")
+st.sidebar.dataframe(
+    pd.DataFrame(
+        [(nama_panel(k), rupiah(v)) for k, v in calc.db["harga_base_panel"].items()],
         columns=["Panel", "Harga dasar"],
-    ))
+    ),
+    hide_index=True,
+    width="stretch",
+)
+st.sidebar.warning(PERINGATAN, icon="⚠️")
 
-# ---------------- Main ----------------
 st.title("🚗 Estimasi Biaya Body Repair")
-st.caption("Upload foto kerusakan mobil. Sistem mendeteksi kerusakan (YOLOv8-Seg), "
-           "mengenali panel, mengukur kedalaman penyok (MiDaS), lalu menghitung estimasi biaya.")
-
-if pipeline.using_placeholder:
-    st.warning("Model kerusakan belum dilatih. Saat ini memakai **yolov8s-seg.pt (COCO)** sebagai "
-               "placeholder, sehingga yang terdeteksi adalah objek umum, bukan kerusakan.")
-if pipeline.parts_detector is None:
-    st.info("Model panel (`weights/parts_best.pt`) belum ada, panel dipilih manual.")
+st.caption("Upload foto kerusakan mobil. Sistem akan mendeteksi penyok dan baret, mengenali panel "
+           "yang rusak, lalu menghitung estimasi biaya perbaikan.")
 
 uploaded = st.file_uploader("Foto mobil", type=["jpg", "jpeg", "png"])
 if uploaded is None:
     st.stop()
 
-# Inferensi model hanya diulang jika foto atau threshold berubah
-cache_key = (uploaded.file_id, conf)
+cache_key = uploaded.file_id
 if st.session_state.get("cache_key") != cache_key:
     image = cv2.imdecode(np.frombuffer(uploaded.getvalue(), np.uint8), cv2.IMREAD_COLOR)
     with st.spinner("Menganalisis foto..."):
-        st.session_state.raw = pipeline.run_models(image, conf=conf)
+        st.session_state.raw = pipeline.run_models(image)
     st.session_state.cache_key = cache_key
 raw = st.session_state.raw
 
-# Kerusakan tanpa panel -> minta pengguna memilih panel
 preview = pipeline.estimate(raw)
 manual_panel = None
 if preview["unassigned"]:
-    names = ", ".join(sorted({d["class_name"] for d in preview["unassigned"]}))
     manual_panel = st.selectbox(
-        f"{len(preview['unassigned'])} kerusakan ({names}) tidak menempel ke panel yang terdeteksi. "
-        "Pilih panelnya:",
+        "Sebagian kerusakan tidak dapat dikenali panelnya. Pilih panel yang rusak:",
         calc.panel_names(),
+        format_func=nama_panel,
     )
 result = pipeline.estimate(raw, manual_panel) if manual_panel else preview
 
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 col1.image(to_rgb(raw["image"]), caption="Foto asli", width="stretch")
-col2.image(to_rgb(result["overlay"]), caption="Deteksi (merah = kerusakan, biru = panel)",
+col2.image(to_rgb(result["overlay"]), caption="Hasil deteksi (merah = kerusakan, biru = panel)",
            width="stretch")
-col3.image(to_rgb(result["depth_vis"]), caption="Depth map MiDaS", width="stretch")
 
 st.subheader("Rincian estimasi")
 if not result["items"]:
@@ -86,15 +83,11 @@ else:
     for item in result["items"]:
         c = item["cost"]
         rows.append({
-            "Panel": item["panel_key"] or "(harga belum ada)",
-            "Kelas panel": item["part_class"],
-            "Kerusakan": ", ".join(item["damage_classes"]),
-            "Luas A_mask": f"{item['mask_area_ratio']*100:.1f}%",
-            "Kedalaman D_depth": round(item["depth_deviation"], 3),
-            "Pengganda": f"{c['parameters']['multiplier']}x" if c else "-",
-            "Harga dasar": c["formatted_base"] if c else "-",
-            "Estimasi": c["formatted_total"] if c else item["status"],
+            "Panel": nama_panel(item["panel_key"]) if item["panel_key"] else item["part_class"],
+            "Kerusakan": ", ".join(NAMA_KERUSAKAN.get(d, d) for d in item["damage_classes"]),
+            "Estimasi biaya": c["formatted_total"] if c else "Perlu pengecekan di bengkel",
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 st.metric("Total estimasi biaya", result["formatted_total"])
+st.warning(PERINGATAN, icon="⚠️")
