@@ -1,7 +1,8 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 ultralytics
 torch
 torchvision
-opencv-python
+opencv-python-headless
 matplotlib
 pillow
 pandas

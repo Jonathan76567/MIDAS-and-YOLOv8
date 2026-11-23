@@ -16,3 +16,7 @@ output/
 # Clone repo yang tidak sengaja ada di dalam folder project
 MIDAS-and-YOLOv8/
 .claude
+
+# Kredensial, jangan di-push
+secrets.toml
+.streamlit/secrets.toml
