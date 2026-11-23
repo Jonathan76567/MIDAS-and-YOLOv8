@@ -3,41 +3,26 @@ import sys
 import cv2
 import numpy as np
 import torch
+from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+
+MODEL_ID = 'depth-anything/Depth-Anything-V2-Small-hf'
 
 
 class DepthEstimator:
-    def __init__(self, model_type='MiDaS_small'):
-        """
-        Estimasi kedalaman monokular menggunakan MiDaS (intel-isl/MiDaS via torch.hub).
-        - model_type: 'MiDaS_small' (ringan, cocok untuk CPU), 'DPT_Hybrid', atau 'DPT_Large'
-
-        Catatan: output MiDaS adalah *relative inverse depth* (nilai besar = lebih dekat
-        ke kamera), bukan jarak dalam satuan meter. Karena itu kedalaman penyok diukur
-        sebagai deviasi relatif terhadap permukaan di sekitarnya.
-        """
-        print(f"[INFO] Memuat model MiDaS ({model_type})...")
-        # MiDaS_small memuat backbone dari repo ini; tandai trusted agar tidak ada prompt input
-        torch.hub.list('rwightman/gen-efficientnet-pytorch', trust_repo=True)
-
+    def __init__(self, model_id=MODEL_ID):
+        print(f"[INFO] Memuat model kedalaman ({model_id})...")
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model = torch.hub.load('intel-isl/MiDaS', model_type, trust_repo=True)
+        self.processor = AutoImageProcessor.from_pretrained(model_id)
+        self.model = AutoModelForDepthEstimation.from_pretrained(model_id)
         self.model.to(self.device).eval()
-
-        transforms = torch.hub.load('intel-isl/MiDaS', 'transforms', trust_repo=True)
-        if model_type in ('DPT_Large', 'DPT_Hybrid'):
-            self.transform = transforms.dpt_transform
-        else:
-            self.transform = transforms.small_transform
+        self._crop_cache = {}
 
     def estimate(self, image_bgr):
-        """
-        Menghasilkan depth map (float32, ukuran sama dengan gambar input).
-        """
         img_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        input_batch = self.transform(img_rgb).to(self.device)
 
         with torch.no_grad():
-            prediction = self.model(input_batch)
+            inputs = self.processor(images=img_rgb, return_tensors='pt').to(self.device)
+            prediction = self.model(**inputs).predicted_depth
             prediction = torch.nn.functional.interpolate(
                 prediction.unsqueeze(1),
                 size=img_rgb.shape[:2],
@@ -48,69 +33,58 @@ class DepthEstimator:
         return prediction.cpu().numpy().astype(np.float32)
 
     @staticmethod
-    def depth_deviation(depth_map, damage_mask, region_mask=None):
-        """
-        Menghitung deviasi kedalaman area kerusakan (D_depth, rentang 0.0 - 1.0).
-
-        D_depth = |median(depth di dalam mask) - median(depth cincin sekitar mask)|
-                  / rentang depth pada region (persentil 98 - persentil 2)
-
-        Param:
-        - depth_map: output estimate()
-        - damage_mask: binary mask kerusakan (H, W)
-        - region_mask: binary mask panel (opsional). Jika ada, cincin pembanding dan
-          normalisasi dibatasi di dalam panel agar tidak terpengaruh latar belakang.
-        """
+    def surface_deviation(depth_map, damage_mask):
         damage = damage_mask.astype(bool)
         if damage.sum() == 0:
             return 0.0
-
-        # Cincin di sekitar kerusakan = hasil dilasi mask dikurangi mask itu sendiri
         k = max(7, int(0.15 * np.sqrt(damage.sum())))
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-        dilated = cv2.dilate(damage.astype(np.uint8), kernel).astype(bool)
-        ring = dilated & ~damage
-
-        if region_mask is not None:
-            region = region_mask.astype(bool) | damage
-            ring_in_region = ring & region
-            if ring_in_region.sum() > 0:
-                ring = ring_in_region
-        else:
-            region = dilated
-
-        if ring.sum() == 0:
+        ring = cv2.dilate(damage.astype(np.uint8), kernel).astype(bool) & ~damage
+        if ring.sum() < 10:
             return 0.0
 
-        d_inside = np.median(depth_map[damage])
-        d_ring = np.median(depth_map[ring])
+        h, w = depth_map.shape
 
-        region_vals = depth_map[region]
-        depth_range = np.percentile(region_vals, 98) - np.percentile(region_vals, 2)
-        if depth_range <= 1e-6:
+        # permukaan kuadratik z = f(x, y)
+        def design(xs, ys):
+            xs, ys = xs / w, ys / h
+            return np.stack([xs, ys, np.ones_like(xs), xs * xs, ys * ys, xs * ys], 1)
+
+        ys, xs = np.nonzero(ring)
+        coef, *_ = np.linalg.lstsq(design(xs, ys), depth_map[ring].astype(np.float64), rcond=None)
+        yi, xi = np.nonzero(damage)
+        resid = depth_map[damage] - design(xi, yi) @ coef
+
+        vals = np.r_[depth_map[damage], depth_map[ring]]
+        span = np.percentile(vals, 98) - np.percentile(vals, 2)
+        if span <= 1e-6:
             return 0.0
+        return float(np.clip(np.percentile(np.abs(resid), 75) / span, 0.0, 1.0))
 
-        deviation = abs(d_inside - d_ring) / depth_range
-        return float(np.clip(deviation, 0.0, 1.0))
+    def crop_depth_deviation(self, image_bgr, damage_mask, margin=0.25):
+        mask = damage_mask.astype(np.uint8)
+        if mask.sum() == 0:
+            return 0.0
+        x, y, bw, bh = cv2.boundingRect(mask)
+        h, w = mask.shape
+        px, py = int(bw * margin) + 8, int(bh * margin) + 8
+        x0, y0, x1, y1 = max(0, x - px), max(0, y - py), min(w, x + bw + px), min(h, y + bh + py)
 
-    @staticmethod
-    def colorize(depth_map):
-        """Mengubah depth map menjadi heatmap BGR untuk visualisasi."""
-        d = depth_map - depth_map.min()
-        d = (255 * d / (d.max() + 1e-6)).astype(np.uint8)
-        return cv2.applyColorMap(d, cv2.COLORMAP_INFERNO)
+        crop = image_bgr[y0:y1, x0:x1]
+        key = (x0, y0, x1, y1, hash(crop.tobytes()))
+        if key not in self._crop_cache:
+            if len(self._crop_cache) > 256:
+                self._crop_cache.clear()
+            self._crop_cache[key] = self.estimate(crop)
+        return self.surface_deviation(self._crop_cache[key], mask[y0:y1, x0:x1])
 
 
-# --- Pengujian Mandiri Depth Estimator ---
 if __name__ == "__main__":
-    img_path = sys.argv[1] if len(sys.argv) > 1 else 'bus.jpg'
-    image = cv2.imread(img_path)
+    if len(sys.argv) < 2:
+        sys.exit("Pemakaian: python -m src.depth_estimator <path_foto>")
+    image = cv2.imread(sys.argv[1])
     if image is None:
-        raise FileNotFoundError(f"Gambar tidak ditemukan di: {img_path}")
+        raise FileNotFoundError(f"Gambar tidak ditemukan di: {sys.argv[1]}")
 
-    estimator = DepthEstimator()
-    depth = estimator.estimate(image)
+    depth = DepthEstimator().estimate(image)
     print(f"Depth map: shape={depth.shape}, min={depth.min():.2f}, max={depth.max():.2f}")
-
-    cv2.imwrite("test_depth_output.jpg", DepthEstimator.colorize(depth))
-    print("[INFO] Heatmap kedalaman disimpan sebagai 'test_depth_output.jpg'")

@@ -1,22 +1,3 @@
-"""
-Konversi dataset Kaggle "Car parts & car damages" (format Supervisely) ke format YOLO-seg.
-
-PERHATIAN: nama folder di dataset asli TERTUKAR:
-- "Car damages dataset" berisi label PANEL (Front-door, Hood, Fender, ...)
-- "Car parts dataset"   berisi label KERUSAKAN (Dent, Scratch, ...)
-
-Pembagian split dilakukan per nama file gambar, sehingga foto yang ada di kedua
-dataset (441 foto) selalu berada di split yang sama untuk model panel dan model
-kerusakan. Foto bersama di split test dipakai untuk evaluasi end-to-end.
-
-Dataset kerusakan ditambah CarDD (Wang et al., 2023; dari Hugging Face
-"harpreetsahota/CarDD", format FiftyOne, hanya split train CarDD = 2816 foto) di
-data/raw/CarDD_hf/. Hanya kelas dent & scratch yang dipakai. Foto CarDD dibagi
-70/15/15 dengan seed terpisah, sehingga split dataset Kaggle tidak berubah.
-
-Jalankan dari root project:
-    python -m src.convert_dataset
-"""
 import argparse
 import base64
 import io
@@ -35,28 +16,23 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RAW_DIR = os.path.join(ROOT_DIR, 'data', 'raw')
 OUT_DIR = os.path.join(ROOT_DIR, 'data', 'annotated')
 
+# nama folder di dataset asli tertukar
 DATASETS = {
-    # nama output -> folder asli (tertukar, lihat docstring)
     'parts': 'Car damages dataset',
     'damage': 'Car parts dataset',
 }
 SPLITS = ('train', 'val', 'test')
 
-# Kelas yang dipakai per dataset (None = semua kelas di meta.json).
-# Skripsi difokuskan pada kerusakan Dent & Scratch; anotasi kelas lain diabaikan
-# (area tersebut dianggap latar belakang oleh model).
 CLASS_FILTER = {
     'parts': None,
     'damage': ['Dent', 'Scratch'],
 }
 
-# Dataset tambahan untuk model kerusakan: CarDD (label huruf kecil -> nama kelas kita)
 CARDD_DIR = os.path.join(RAW_DIR, 'CarDD_hf')
 CARDD_LABEL_MAP = {'dent': 'Dent', 'scratch': 'Scratch'}
 
 
 def safe_stem(filename):
-    """'Car damages 102.jpg' -> 'car_damages_102' (tanpa spasi agar aman di semua tool)."""
     stem = os.path.splitext(filename)[0]
     return re.sub(r'[^0-9a-zA-Z]+', '_', stem).strip('_').lower()
 
@@ -74,10 +50,6 @@ def split_names(names, ratios, rng):
 
 
 def make_split(image_sets, ratios, seed):
-    """
-    Setiap nama gambar mendapat satu split. Foto bersama, foto khusus panel, dan
-    foto khusus kerusakan masing-masing dibagi dengan rasio yang sama.
-    """
     rng = random.Random(seed)
     parts, damage = image_sets['parts'], image_sets['damage']
     groups = {'shared': parts & damage, 'parts_only': parts - damage, 'damage_only': damage - parts}
@@ -91,13 +63,12 @@ def make_split(image_sets, ratios, seed):
 
 
 def ann_to_yolo_lines(ann, class_index):
-    """Satu objek poligon -> 'cls x1 y1 x2 y2 ...' (koordinat ternormalisasi 0-1)."""
     w, h = ann['size']['width'], ann['size']['height']
     lines = []
     for obj in ann['objects']:
         if obj['geometryType'] != 'polygon' or obj['classTitle'] not in class_index:
             continue
-        pts = obj['points']['exterior']  # lubang (interior) diabaikan, YOLO-seg tidak mendukung
+        pts = obj['points']['exterior']
         if len(pts) < 3:
             continue
         coords = []
@@ -109,7 +80,6 @@ def ann_to_yolo_lines(ann, class_index):
 
 
 def load_cardd_samples():
-    """Baca samples.json FiftyOne CarDD; None jika dataset belum diunduh."""
     path = os.path.join(CARDD_DIR, 'samples.json')
     if not os.path.exists(path):
         return None
@@ -118,7 +88,6 @@ def load_cardd_samples():
 
 
 def cardd_split(samples, ratios, seed):
-    """Split CarDD per file; seed berbeda agar tidak memengaruhi urutan split Kaggle."""
     names = [os.path.basename(s['filepath']) for s in samples]
     assignment = {}
     for split, group in split_names(names, ratios, random.Random(seed + 1)).items():
@@ -128,10 +97,7 @@ def cardd_split(samples, ratios, seed):
 
 
 def cardd_mask_polygons(det, img_w, img_h):
-    """
-    Mask FiftyOne (array biner seukuran bounding box, dikompresi zlib + np.save)
-    -> list poligon (koordinat piksel pada gambar penuh).
-    """
+    # mask FiftyOne: array seukuran bounding box, dikompres zlib
     raw = zlib.decompress(base64.b64decode(det['mask']['$binary']['base64']))
     mask = np.load(io.BytesIO(raw)).astype(np.uint8)
 
@@ -166,10 +132,6 @@ def cardd_to_yolo_lines(sample, class_index):
 
 
 def write_source_lists(dst, class_names, files_by_source):
-    """
-    Daftar gambar per sumber (kaggle / cardd) per split + data.yaml khusus test per
-    sumber, agar evaluasi di Bab 4 bisa dilaporkan terpisah.
-    """
     for source, by_split in files_by_source.items():
         for split, files in by_split.items():
             with open(os.path.join(dst, f'{split}_{source}.txt'), 'w', encoding='utf-8') as f:
@@ -186,15 +148,9 @@ def write_source_lists(dst, class_names, files_by_source):
 
 
 def convert(ratios=(0.7, 0.15, 0.15), seed=42, only=None, use_cardd=True):
-    """
-    - only: list nama dataset yang dikonversi ulang (mis. ['damage']); default semua.
-      Split tetap identik karena ditentukan dari daftar gambar kedua dataset + seed.
-    - use_cardd: tambahkan CarDD (dent & scratch) ke dataset kerusakan bila tersedia
-    """
     cardd_samples = load_cardd_samples() if use_cardd else None
     cardd_assignment = cardd_split(cardd_samples, ratios, seed) if cardd_samples else {}
 
-    # Cek kelengkapan gambar CarDD sebelum folder output lama dihapus
     if cardd_samples and (not only or 'damage' in only):
         missing = [s['filepath'] for s in cardd_samples
                    if not os.path.exists(os.path.join(CARDD_DIR, s['filepath']))]
@@ -282,7 +238,6 @@ def convert(ratios=(0.7, 0.15, 0.15), seed=42, only=None, use_cardd=True):
 
         summary[key] = {'classes': class_names, 'images': counts}
 
-    # Daftar foto bersama per split, untuk evaluasi end-to-end (panel + kerusakan)
     shared_split = {s: sorted(n for n in shared if assignment[n] == s) for s in SPLITS}
     with open(os.path.join(OUT_DIR, 'split_info.json'), 'w', encoding='utf-8') as f:
         json.dump({

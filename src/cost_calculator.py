@@ -12,16 +12,11 @@ class CostCalculator:
         self.alpha = self.db.get("bobot_formula", {}).get("alpha_luas", 0.5)
         self.beta = self.db.get("bobot_formula", {}).get("beta_kedalaman", 0.8)
 
-        # Pemetaan kelas model panel -> key harga_base_panel (None = harga belum tersedia).
-        # Key berawalan "_" hanya keterangan di file JSON.
         self.panel_mapping = {k: v for k, v in self.db.get("panel_mapping", {}).items()
                               if not k.startswith("_")}
-
-        # Kelas kerusakan yang diukur kedalamannya (mis. Dent); kelas lain D_depth = 0
         self.depth_classes = set(self.db.get("kelas_kedalaman", {}).get("kelas", []))
 
     def panel_names(self):
-        """Daftar panel yang punya harga dasar (untuk pilihan manual di UI)."""
         return list(self.db.get("harga_base_panel", {}).keys())
 
     def calculate_cost(self, panel_name, mask_area_ratio, depth_deviation):
@@ -32,7 +27,7 @@ class CostCalculator:
         Param:
         - panel_name (str): Nama panel (e.g. 'pintu_depan')
         - mask_area_ratio (float): Rasio luas mask kerusakan terhadap panel (0.0 - 1.0)
-        - depth_deviation (float): Deviasi kedalaman penyok dari MiDaS (0.0 - 1.0)
+        - depth_deviation (float): Deviasi kedalaman penyok dari model kedalaman (0.0 - 1.0)
         """
         base_prices = self.db.get("harga_base_panel", {})
         

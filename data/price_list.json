@@ -7,14 +7,16 @@
     "alpha_luas": 0.5,
     "beta_kedalaman": 0.8
   },
+  "keterangan_harga": "harga per panel disamaratakan Rp 700.000; atap dihitung 2 panel karena luas",
   "harga_base_panel": {
-    "pintu_depan": 500000,
-    "pintu_belakang": 500000,
-    "bumper_depan": 450000,
-    "bumper_belakang": 450000,
-    "kap_mesin": 650000,
-    "fender": 400000,
-    "bagasi": 500000
+    "pintu_depan": 700000,
+    "pintu_belakang": 700000,
+    "bumper_depan": 700000,
+    "bumper_belakang": 700000,
+    "kap_mesin": 700000,
+    "fender": 700000,
+    "bagasi": 700000,
+    "atap": 1400000
   },
   "panel_mapping": {
     "_keterangan": "kelas model panel -> key harga_base_panel; null = panel body tapi harga belum tersedia",
@@ -27,7 +29,7 @@
     "Trunk": "bagasi",
     "Quarter-panel": null,
     "Rocker-panel": null,
-    "Roof": null
+    "Roof": "atap"
   },
   "kelas_kedalaman": {
     "_keterangan": "hanya kerusakan kelas ini yang diukur kedalamannya (D_depth); kelas lain D_depth = 0",

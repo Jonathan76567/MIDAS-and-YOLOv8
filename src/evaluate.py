@@ -1,16 +1,3 @@
-"""
-Evaluasi end-to-end pipeline pada foto yang memiliki label panel DAN kerusakan
-(foto bersama di split test, lihat data/annotated/split_info.json).
-
-Untuk setiap foto, biaya dihitung dua kali dengan formula yang sama:
-- Ground truth : mask panel & kerusakan dari anotasi manual
-- Prediksi     : mask dari model YOLOv8-Seg
-Depth map MiDaS yang sama dipakai untuk keduanya, sehingga selisih biaya murni
-berasal dari kualitas segmentasi dan pencocokan panel.
-
-Jalankan dari root project (setelah model dilatih):
-    python -m src.evaluate
-"""
 import json
 import os
 
@@ -22,10 +9,6 @@ from src.convert_dataset import CLASS_FILTER, DATASETS, OUT_DIR, RAW_DIR
 
 
 def load_gt_dets(ann_path, classes=None):
-    """
-    Anotasi Supervisely -> list deteksi dengan format yang sama seperti SegDetector.predict().
-    - classes: hanya ambil kelas ini (None = semua), disamakan dengan kelas model
-    """
     with open(ann_path, encoding='utf-8') as f:
         ann = json.load(f)
     h, w = ann['size']['height'], ann['size']['width']
@@ -48,13 +31,11 @@ def load_gt_dets(ann_path, classes=None):
             'confidence': 1.0,
             'bbox': [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())],
             'mask_binary': mask,
-            'mask_pixel_count': int(mask.sum()),
         })
     return dets
 
 
 def _costs_by_panel(result):
-    """Jumlahkan biaya & ambil A_mask terbesar per key panel (hanya panel berharga)."""
     out = {}
     for item in result['items']:
         if not item['cost']:
@@ -70,11 +51,7 @@ def _costs_by_panel(result):
 
 
 def evaluate_end_to_end(pipeline, split='test', limit=None):
-    """
-    Returns:
-    - per_panel: DataFrame satu baris per (foto, panel) dari gabungan GT & prediksi
-    - summary: dict metrik ringkasan
-    """
+    # foto yang punya label panel dan kerusakan sekaligus
     with open(os.path.join(OUT_DIR, 'split_info.json'), encoding='utf-8') as f:
         names = json.load(f)['shared_images'][split]
     if limit:
@@ -91,7 +68,6 @@ def evaluate_end_to_end(pipeline, split='test', limit=None):
             'image': image,
             'damage_dets': load_gt_dets(os.path.join(damage_dir, 'ann', name + '.json'), CLASS_FILTER['damage']),
             'part_dets': load_gt_dets(os.path.join(parts_dir, 'ann', name + '.json'), CLASS_FILTER['parts']),
-            'depth_map': pred_raw['depth_map'],
         }
 
         gt = _costs_by_panel(pipeline.estimate(gt_raw))
@@ -141,8 +117,6 @@ if __name__ == '__main__':
     from src.pipeline import BodyRepairPipeline
 
     pipe = BodyRepairPipeline()
-    if pipe.using_placeholder or pipe.parts_detector is None:
-        print('[PERINGATAN] Model belum dilatih; hasil evaluasi tidak bermakna.')
     per_panel, summary = evaluate_end_to_end(pipe)
     print(per_panel.to_string(index=False))
     print('\n=== RINGKASAN ===')

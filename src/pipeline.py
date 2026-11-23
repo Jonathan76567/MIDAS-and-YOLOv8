@@ -10,70 +10,44 @@ from src import panel_matcher
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Weight hasil training dipakai otomatis bila sudah ada; sebelum itu pakai placeholder
 DAMAGE_WEIGHTS = os.path.join(ROOT_DIR, 'weights', 'damage_best.pt')
 PARTS_WEIGHTS = os.path.join(ROOT_DIR, 'weights', 'parts_best.pt')
-PLACEHOLDER_WEIGHTS = os.path.join(ROOT_DIR, 'yolov8s-seg.pt')
 PRICE_LIST = os.path.join(ROOT_DIR, 'data', 'price_list.json')
 
+DEPTH_CROP_MARGIN = 0.25
 
-def _existing(path):
-    return path if os.path.exists(path) and os.path.getsize(path) > 0 else None
+# threshold kerusakan hasil tuning di data validasi
+DAMAGE_CONF = 0.10
+PARTS_CONF = 0.25
 
 
 class BodyRepairPipeline:
-    def __init__(self, damage_model_path=None, parts_model_path=None,
-                 price_list_path=PRICE_LIST, conf_threshold=0.25, midas_type='MiDaS_small'):
-        """
-        Pipeline lengkap: deteksi kerusakan -> deteksi panel -> pencocokan
-        -> estimasi kedalaman -> kalkulasi biaya.
+    def __init__(self, damage_model_path=DAMAGE_WEIGHTS, parts_model_path=PARTS_WEIGHTS,
+                 price_list_path=PRICE_LIST, damage_conf=DAMAGE_CONF, parts_conf=PARTS_CONF):
+        for path in (damage_model_path, parts_model_path):
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Model tidak ditemukan: {path}. Latih dulu dengan train.py")
 
-        - damage_model_path: default weights/damage_best.pt, fallback ke yolov8s-seg.pt
-        - parts_model_path: default weights/parts_best.pt; jika belum ada, deteksi panel
-          dinonaktifkan dan panel dipilih manual oleh pengguna
-        """
-        damage_model_path = damage_model_path or _existing(DAMAGE_WEIGHTS) or PLACEHOLDER_WEIGHTS
-        parts_model_path = parts_model_path or _existing(PARTS_WEIGHTS)
-
-        self.using_placeholder = damage_model_path == PLACEHOLDER_WEIGHTS
-        self.damage_detector = SegDetector(damage_model_path, conf_threshold)
-        self.parts_detector = SegDetector(parts_model_path, conf_threshold) if parts_model_path else None
-        self.depth_estimator = DepthEstimator(midas_type)
+        self.damage_detector = SegDetector(damage_model_path, damage_conf)
+        self.parts_detector = SegDetector(parts_model_path, parts_conf)
+        self.depth_estimator = DepthEstimator()
         self.calculator = CostCalculator(price_list_path)
 
-    # ------------------------------------------------------------------
-    # Tahap 1: inferensi semua model (berat, hasilnya bisa di-cache)
-    # ------------------------------------------------------------------
-    def run_models(self, image_bgr, conf=None):
-        damage_dets, _ = self.damage_detector.predict(image_bgr, conf=conf)
-        part_dets = []
-        if self.parts_detector is not None:
-            part_dets, _ = self.parts_detector.predict(image_bgr, conf=conf)
-        depth_map = self.depth_estimator.estimate(image_bgr)
-
+    def run_models(self, image_bgr, damage_conf=None, parts_conf=None):
         return {
             "image": image_bgr,
-            "damage_dets": damage_dets,
-            "part_dets": part_dets,
-            "depth_map": depth_map,
+            "damage_dets": self.damage_detector.predict(image_bgr, conf=damage_conf),
+            "part_dets": self.parts_detector.predict(image_bgr, conf=parts_conf),
         }
 
-    # ------------------------------------------------------------------
-    # Tahap 2: pencocokan panel + kalkulasi biaya (ringan)
-    # ------------------------------------------------------------------
     def estimate(self, raw, manual_panel=None):
-        """
-        - manual_panel: key panel pilihan pengguna untuk kerusakan yang tidak
-          menempel ke panel terdeteksi. Untuk kelompok ini A_mask dihitung
-          terhadap seluruh gambar (asumsi foto close-up satu panel).
-        """
         image = raw["image"]
-        depth_map = raw["depth_map"]
 
         panels, unassigned = panel_matcher.match(
             raw["damage_dets"], raw["part_dets"], self.calculator.panel_mapping
         )
 
+        # kerusakan tanpa panel: luas dihitung terhadap seluruh gambar
         if manual_panel and unassigned:
             union = np.zeros(image.shape[:2], dtype=bool)
             for d in unassigned:
@@ -82,7 +56,6 @@ class BodyRepairPipeline:
                 "panel_key": manual_panel,
                 "part_class": "(dipilih manual)",
                 "part_mask": None,
-                "damage_mask": union,
                 "damages": unassigned,
                 "mask_area_ratio": float(union.sum() / union.size),
             })
@@ -90,7 +63,7 @@ class BodyRepairPipeline:
 
         items = []
         for p in panels:
-            d_depth = self._panel_depth(depth_map, p)
+            d_depth = self._panel_depth(image, p)
             if p["panel_key"] is None:
                 cost, status = None, f"Harga panel '{p['part_class']}' belum tersedia"
             else:
@@ -114,31 +87,26 @@ class BodyRepairPipeline:
             "total": total,
             "formatted_total": f"Rp {total:,.0f}".replace(",", "."),
             "overlay": self.draw_overlay(image, raw["part_dets"], raw["damage_dets"]),
-            "depth_vis": DepthEstimator.colorize(depth_map),
         }
 
-    def _panel_depth(self, depth_map, panel):
-        """
-        D_depth hanya dari kerusakan yang punya dimensi kedalaman (price_list:
-        kelas_kedalaman, mis. Dent). Goresan/cat mengelupas tidak diukur agar
-        MiDaS tidak memberi kedalaman palsu. Tanpa kerusakan tersebut, D_depth = 0.
-        """
+    def _panel_depth(self, image, panel):
+        # kedalaman hanya untuk kelas di kelas_kedalaman (Dent), diambil penyok terdalam
         depth_dmgs = [d for d in panel["damages"] if d["class_name"] in self.calculator.depth_classes]
-        if not depth_dmgs:
-            return 0.0
 
-        mask = np.zeros(depth_map.shape, dtype=bool)
+        d_depth = 0.0
         for d in depth_dmgs:
-            mask |= d["mask_binary"].astype(bool)
-        if panel["part_mask"] is not None:
-            mask &= panel["part_mask"]
-        return DepthEstimator.depth_deviation(depth_map, mask, panel["part_mask"])
+            mask = d["mask_binary"].astype(bool)
+            if panel["part_mask"] is not None:
+                mask &= panel["part_mask"]
+            if mask.sum() < 50:
+                continue
+            d_depth = max(d_depth, self.depth_estimator.crop_depth_deviation(image, mask, DEPTH_CROP_MARGIN))
+        return d_depth
 
-    def analyze(self, image_bgr, manual_panel=None, conf=None):
-        return self.estimate(self.run_models(image_bgr, conf=conf), manual_panel)
+    def analyze(self, image_bgr, manual_panel=None, damage_conf=None, parts_conf=None):
+        return self.estimate(self.run_models(image_bgr, damage_conf, parts_conf), manual_panel)
 
     def draw_overlay(self, image, part_dets, damage_dets):
-        """Panel: biru transparan + label. Kerusakan: merah transparan + kontur + label."""
         out = image.copy()
         mapping = self.calculator.panel_mapping
 
