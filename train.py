@@ -1,16 +1,3 @@
-"""
-Training model panel & kerusakan (YOLOv8-Seg) langsung di laptop.
-
-Contoh:
-    python train.py                      # latih kedua model (panel lalu kerusakan)
-    python train.py --model damage       # hanya model kerusakan
-    python train.py --resume             # lanjutkan training yang terputus
-    python train.py --model damage --weights weights/damage_kaggle_only.pt --epochs 25   # fine-tune dari model lama
-    python train.py --epochs 1 --fraction 0.05 --imgsz 320   # uji coba cepat
-
-Weight terbaik otomatis disalin ke weights/parts_best.pt dan weights/damage_best.pt,
-yang langsung dipakai oleh app.py dan main.py.
-"""
 import argparse
 import os
 import shutil
@@ -30,7 +17,7 @@ def train_one(name, args):
     last_ckpt = os.path.join(RUNS_DIR, name, 'weights', 'last.pt')
     dst = os.path.join(ROOT_DIR, 'weights', f'{name}_best.pt')
 
-    # Checkpoint training yang sudah selesai ditandai epoch = -1 oleh Ultralytics
+    # epoch -1 = training sudah selesai
     if args.resume and os.path.exists(last_ckpt):
         if torch.load(last_ckpt, map_location='cpu', weights_only=False).get('epoch') == -1:
             print(f'[INFO] Training {name} sudah selesai sebelumnya, dilewati')
@@ -43,7 +30,6 @@ def train_one(name, args):
         if args.resume:
             print(f'[INFO] Checkpoint {name} tidak ditemukan, mulai dari awal')
         elif os.path.exists(last_ckpt):
-            # Training baru: buang checkpoint run lama agar --resume tidak salah melanjutkan run lama
             os.remove(last_ckpt)
         print(f'[INFO] Training {name} dari bobot awal {args.weights}')
         results = YOLO(args.weights).train(
@@ -77,7 +63,7 @@ def main():
     parser.add_argument('--workers', type=int, default=4)
     parser.add_argument('--resume', action='store_true', help='lanjutkan dari runs/<model>/weights/last.pt')
     parser.add_argument('--weights', default=os.path.join(ROOT_DIR, 'yolov8s-seg.pt'),
-                        help='bobot awal (default pretrained COCO); mis. weights/damage_kaggle_only.pt untuk fine-tune')
+                        help='bobot awal (default pretrained COCO)')
     args = parser.parse_args()
 
     for name, path in DATA.items():
